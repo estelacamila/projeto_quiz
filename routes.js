@@ -1,12 +1,13 @@
 import express from "express";
 import sql from "./database.js";
+import bcrypt from "bcrypt";
 
 const routes = express.Router();
 
-// ROTA PARA PROCURAR TODOS OS USUÁRIOS
+// BUSCAR TODOS OS USUÁRIOS
 routes.get('/usuarios', async (req, res) => {
     try {
-        const usuarios = await sql`SELECT * FROM Usuarios`;
+        const usuarios = await sql`SELECT * FROM usuario`;
         return res.status(200).json(usuarios);
     } catch (error) {
         console.error(error);
@@ -14,26 +15,42 @@ routes.get('/usuarios', async (req, res) => {
     }
 });
 
-// ROTA PARA FAZER O LOGIN
+// LOGIN COM COMPARAÇÃO DE SENHA (HASH)
 routes.post('/Login', async (req, res) => {
     const { email, senha } = req.body;
     try {
-        let resp = await sql`SELECT * FROM usuario WHERE email = ${email} AND senha = ${senha}`;
-        if (resp.length === 0) {
-            return res.status(401).json({ message: 'Email ou senha inválidos' });
+        const resultado = await sql`SELECT * FROM usuario WHERE email = ${email}`;
+        
+        if (resultado.length === 0) {
+            return res.status(401).json({ message: 'Email não encontrado' });
         }
-        return res.status(200).json(resp[0]);
+
+        const usuario = resultado[0];
+
+        const senhaValida = await bcrypt.compare(senha, usuario.senha);
+
+        if (!senhaValida) {
+            return res.status(401).json({ message: 'Senha incorreta' });
+        }
+
+        return res.status(200).json({ message: 'Login bem-sucedido', usuario });
     } catch (error) {
         console.error(error);
         return res.status(500).json({ message: 'Erro ao realizar login', error });
     }
 });
 
-// ROTA PARA CADASTRAR OS USUÁRIOS
+// CADASTRAR USUÁRIO COM SENHA CRIPTOGRAFADA
 routes.post('/Cadastrar', async (req, res) => {
     const { email, senha } = req.body;
     try {
-        await sql`INSERT INTO usuario (email, senha) VALUES (${email}, ${senha})`;
+        const senhaCriptografada = await bcrypt.hash(senha, 10);
+
+        await sql`
+            INSERT INTO usuario (email, senha, funcao, status)
+            VALUES (${email}, ${senhaCriptografada}, 'padrao', 1)
+        `;
+
         return res.status(201).json({ message: 'Usuário cadastrado com sucesso!' });
     } catch (error) {
         console.error(error);
@@ -41,7 +58,7 @@ routes.post('/Cadastrar', async (req, res) => {
     }
 });
 
-// ROTA PARA PROCURAR TODAS AS QUESTÕES
+// BUSCAR TODAS AS QUESTÕES
 routes.get('/questao', async (req, res) => {
     try {
         const questoes = await sql`SELECT * FROM perguntas`;
@@ -52,15 +69,33 @@ routes.get('/questao', async (req, res) => {
     }
 });
 
-// ROTA PARA CADASTRAR UMA NOVA QUESTÃO
+// CADASTRAR NOVA QUESTÃO COM HASH NO GABARITO
 routes.post('/questao/cadastrar', async (req, res) => {
     try {
         const { questao, questao1, questao2, questao3, questao4, gabarito, nivel } = req.body;
+
+        // Buscar todas as questões para verificar duplicatas
+        const questoesExistentes = await sql`SELECT * FROM perguntas`;
+
+        const gabaritoRepetido = await Promise.any(
+            questoesExistentes.map(async (q) => {
+                return await bcrypt.compare(gabarito, q.gabarito);
+            })
+        ).catch(() => false); // se nenhuma bater, retorna false
+
+        if (gabaritoRepetido) {
+            return res.status(400).json({ message: 'Já existe uma questão com esse gabarito.' });
+        }
+
+        // Criptografa o gabarito antes de salvar
+        const gabaritoHash = await bcrypt.hash(gabarito, 10);
+
         const insert = await sql`
             INSERT INTO perguntas (questao, questao1, questao2, questao3, questao4, gabarito, nivel)
-            VALUES (${questao}, ${questao1}, ${questao2}, ${questao3}, ${questao4}, ${gabarito}, ${nivel})
+            VALUES (${questao}, ${questao1}, ${questao2}, ${questao3}, ${questao4}, ${gabaritoHash}, ${nivel})
             RETURNING *;
         `;
+
         return res.status(201).json({ message: 'Questão cadastrada com sucesso!', questao: insert[0] });
     } catch (error) {
         console.error(error);
@@ -68,16 +103,18 @@ routes.post('/questao/cadastrar', async (req, res) => {
     }
 });
 
-// ROTA PARA ATUALIZAR UMA QUESTÃO
+// ATUALIZAR UMA QUESTÃO
 routes.put('/Atualizar/:id', async (req, res) => {
     const { id } = req.params;
     const { questao, questao1, questao2, questao3, questao4, gabarito, nivel } = req.body;
 
     try {
+        const gabaritoHash = await bcrypt.hash(gabarito, 10);
+
         const result = await sql`
             UPDATE perguntas
             SET questao = ${questao}, questao1 = ${questao1}, questao2 = ${questao2}, 
-                questao3 = ${questao3}, questao4 = ${questao4}, gabarito = ${gabarito}, nivel = ${nivel}
+                questao3 = ${questao3}, questao4 = ${questao4}, gabarito = ${gabaritoHash}, nivel = ${nivel}
             WHERE id = ${id}
             RETURNING *;
         `;
@@ -93,14 +130,12 @@ routes.put('/Atualizar/:id', async (req, res) => {
     }
 });
 
-// ROTA PARA DELETAR UMA QUESTÃO
+// DELETAR UMA QUESTÃO
 routes.delete('/deletequestao/:id', async (req, res) => {
     const { id } = req.params;
 
     try {
-        const result = await sql`
-            DELETE FROM perguntas WHERE id = ${id} ;
-        `;
+        const result = await sql`DELETE FROM perguntas WHERE id = ${id}`;
 
         if (result.length === 0) {
             return res.status(404).json({ message: 'Questão não encontrada' });
